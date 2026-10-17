@@ -8,8 +8,6 @@
  */
 import {
   Account,
-  Address,
-  nativeToScVal,
   Networks,
   rpc,
   scValToNative,
@@ -18,6 +16,18 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { signTransaction } from "@stellar/freighter-api";
+import {
+  MAX_PAGE_SIZE,
+  availableOperation,
+  cancelStreamOperation,
+  createStreamOperation,
+  getStreamOperation,
+  recipientStreamsOperation,
+  senderStreamsOperation,
+  topUpOperation,
+  withdrawMaxOperation,
+  withdrawOperation,
+} from "./contract-ops";
 
 const RPC_URL =
   process.env.NEXT_PUBLIC_SOROBAN_RPC_URL ||
@@ -58,22 +68,6 @@ export interface StreamView {
   endTime: number;
   cancelable: boolean;
   status: string;
-}
-
-function scAddr(s: string) {
-  return nativeToScVal(new Address(s), { type: "address" });
-}
-
-function u64(id: string | number | bigint) {
-  return nativeToScVal(BigInt(id), { type: "u64" });
-}
-
-function i128(v: string) {
-  return nativeToScVal(BigInt(v), { type: "i128" });
-}
-
-function u32(v: number) {
-  return nativeToScVal(BigInt(v), { type: "u32" });
 }
 
 /**
@@ -177,16 +171,15 @@ export async function createStream(
 ): Promise<bigint> {
   const start = Math.floor(Date.now() / 1000) + 1;
   const end = start + Math.ceil(Number(args.days) * 86_400);
-  const op = contract().call(
-    "create_stream",
-    scAddr(sender),
-    scAddr(args.recipient),
-    scAddr(args.token),
-    i128(args.deposit),
-    u64(start),
-    u64(end),
-    nativeToScVal(args.cancelable)
-  );
+  const op = createStreamOperation(contract(), {
+    sender,
+    recipient: args.recipient,
+    token: args.token,
+    deposit: args.deposit,
+    startTime: start,
+    endTime: end,
+    cancelable: args.cancelable,
+  });
   // create_stream returns the new stream id (u64).
   return send(sender, op, (v) => BigInt(scValToNative(v) as bigint));
 }
@@ -198,7 +191,7 @@ export async function withdrawFromStream(
 ): Promise<void> {
   await send(
     recipient,
-    contract().call("withdraw", u64(streamId), i128(amount)),
+    withdrawOperation(contract(), streamId, amount),
     () => undefined
   );
 }
@@ -213,7 +206,7 @@ export async function withdrawMaxFromStream(
 ): Promise<bigint> {
   return send(
     recipient,
-    contract().call("withdraw_max", u64(streamId)),
+    withdrawMaxOperation(contract(), streamId),
     (v) => BigInt(scValToNative(v) as bigint)
   );
 }
@@ -225,7 +218,7 @@ export async function topUpStream(
 ): Promise<void> {
   await send(
     sender,
-    contract().call("top_up", u64(streamId), i128(amount)),
+    topUpOperation(contract(), streamId, amount),
     () => undefined
   );
 }
@@ -236,22 +229,21 @@ export async function cancelStream(
 ): Promise<void> {
   await send(
     caller,
-    contract().call("cancel_stream", scAddr(caller), u64(streamId)),
+    cancelStreamOperation(contract(), caller, streamId),
     () => undefined
   );
 }
 
 /** Read-only contract call: simulated, never signed, return value decoded. */
 async function simulateRead(
-  method: string,
-  args: xdr.ScVal[]
+  operation: xdr.Operation
 ): Promise<xdr.ScVal | null> {
   const server = new rpc.Server(RPC_URL);
   const tx = new TransactionBuilder(DUMMY_SOURCE, {
     fee: "100",
     networkPassphrase: NETWORK,
   })
-    .addOperation(contract().call(method, ...args))
+    .addOperation(operation)
     .setTimeout(30)
     .build();
   const sim = await server.simulateTransaction(tx);
@@ -261,7 +253,7 @@ async function simulateRead(
 
 /** Read-only view of one stream. */
 export async function readStream(streamId: string): Promise<StreamView> {
-  const retval = await simulateRead("get_stream", [u64(streamId)]);
+  const retval = await simulateRead(getStreamOperation(contract(), streamId));
   if (!retval) {
     throw new Error(`Stream #${streamId} not found or RPC unavailable`);
   }
@@ -282,14 +274,12 @@ export async function readStream(streamId: string): Promise<StreamView> {
 
 /** Accrued-but-unwithdrawn balance of a stream at the current ledger time. */
 export async function readAvailable(streamId: string): Promise<bigint> {
-  const retval = await simulateRead("available", [u64(streamId)]);
+  const retval = await simulateRead(availableOperation(contract(), streamId));
   if (!retval) {
     throw new Error(`Stream #${streamId} not found or RPC unavailable`);
   }
   return BigInt(scValToNative(retval) as bigint);
 }
-
-const MAX_PAGE_SIZE = 50; // mirrors the contract's MAX_PAGE_SIZE
 
 /** One page of stream ids from an address index view (read-only). */
 async function readStreamIdsPage(
@@ -297,11 +287,11 @@ async function readStreamIdsPage(
   address: string,
   offset: number
 ): Promise<string[]> {
-  const retval = await simulateRead(view, [
-    scAddr(address),
-    u32(offset),
-    u32(MAX_PAGE_SIZE),
-  ]);
+  const op =
+    view === "recipient_streams"
+      ? recipientStreamsOperation(contract(), address, offset, MAX_PAGE_SIZE)
+      : senderStreamsOperation(contract(), address, offset, MAX_PAGE_SIZE);
+  const retval = await simulateRead(op);
   if (!retval) return [];
   const raw = scValToNative(retval) as bigint[];
   return (raw ?? []).map((id) => String(id));
