@@ -8,7 +8,7 @@ is derived from the contract's own sources.
 | Spec (contract IR) + schema guard | [`spec/`](./spec), [`generator/check_contract_surface.py`](./generator/check_contract_surface.py) | this change |
 | Generator driver | [`generator/generate.py`](./generator/generate.py) | this change |
 | Conformance vectors | [`vectors/`](./vectors) | this change |
-| TypeScript client | `typescript/` | follow-up PR (first consumer: the frontend) |
+| TypeScript client | [`typescript/`](./typescript) (workspace / `npm pack` only, not on npm) | this change |
 | Rust, Python clients | — | later, one PR per language |
 
 Language packages land separately so each one is reviewed against the shared
@@ -26,6 +26,8 @@ sdks/
   generator/test_*.py             coverage + vector + catalog tests (stdlib only)
   vectors/*.json                  shared conformance fixtures (tx + events + result)
   vectors/builder/                deterministic fixture builder (Node, stellar-sdk)
+  generator/emit_typescript.py    IR -> typescript/src/generated.ts + methods.ts
+  typescript/                     generated bindings + runtime + tests
   Makefile                        spec / check / vectors
 ```
 
@@ -78,13 +80,17 @@ change touches no error code and no `surface.rs` branch.
 ## Generation, not hand-writing
 
 `generate.py` loads the spec and the error catalog and runs each
-`generator/emit_<language>.py` whose package directory exists. This change ships
-the driver with no emitter; the TypeScript PR adds `emit_typescript.py` and
-`sdks/typescript/`, and the same `--check` gate then covers its generated files.
+`generator/emit_<language>.py` whose package directory exists. Today that is
+`emit_typescript.py`, which writes `typescript/src/generated.ts` and
+`typescript/src/methods.ts`; the `--check` gate fails when either differs from
+the generator output. Generated files carry the spec fingerprint in their
+header; add behaviour in `client.ts` / `events.ts`, not in generated files.
 
 ```bash
 make -C sdks spec          # re-derive the spec + fingerprint
+make -C sdks generate      # rewrite generated.ts + methods.ts
 make -C sdks check         # guard + tests + "regeneration is a no-op"
+make -C sdks test          # TypeScript typecheck + tests, incl. every vector
 ```
 
 ## Conformance vectors
@@ -103,6 +109,9 @@ See [`vectors/README.md`](./vectors/README.md) for the format.
 
 ## Versioning and publishing
 
-The spec tracks the contract release line (currently `0.3.0`). Nothing here is
-published to a registry; whether and where language packages are published is
-the maintainers' decision and is out of scope for this change.
+The spec and the TypeScript package track the contract release line
+(currently `0.3.0`). `@streampay/sdk` is **not** on npm: install it from the
+workspace path or an `npm pack` tarball (see
+[`typescript/README.md`](./typescript/README.md)). Whether it is published at
+all is undecided and is the StreamPay maintainers' call; they would hold the
+npm scope and run any release. CI only runs `npm pack --dry-run`.
